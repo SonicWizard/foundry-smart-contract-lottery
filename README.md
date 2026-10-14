@@ -8,27 +8,33 @@ A provably fair raffle built with [Foundry](https://getfoundry.sh/), using
 
 1. Players call `enterRaffle` and pay the entrance fee (0.01 ETH).
 2. Once the interval (30 seconds) has passed and the raffle has players and ETH, `checkUpkeep` returns true.
-3. Anyone can then call `performUpkeep`. It closes entries (the raffle state becomes `CALCULATING`) and requests a
+3. `performUpkeep` can then be called. It closes entries (the raffle state becomes `CALCULATING`) and requests a
    random number from the VRF coordinator.
 4. The coordinator calls back `fulfillRandomWords`, which picks the winner, resets the raffle for the next round and
    sends the winner the whole balance.
 
-Chainlink Automation isn't used to call `performUpkeep`. Run the `PerformUpkeep` script (`mise run upkeep:sepolia`)
-or call it with `cast` instead.
+A [Chainlink CRE](https://docs.chain.link/cre) workflow calls `performUpkeep` when it's due, in place of Chainlink
+Automation (see [Automating upkeep with Chainlink CRE](#automating-upkeep-with-chainlink-cre)). Anyone can also call it
+by hand with the `PerformUpkeep` script (`mise run upkeep:sepolia`) or `cast`.
 
 | Path | Contents |
 | --- | --- |
 | `src/Raffle.sol` | The raffle contract |
+| `src/RaffleUpkeepReceiver.sol` | Receives reports from the CRE workflow and calls `performUpkeep` |
 | `script/HelperConfig.s.sol` | Per-chain settings: VRF coordinator, gas lane, subscription, LINK token, broadcasting account |
 | `script/DeployRaffle.s.sol` | Deploys the raffle and adds it as a consumer of the VRF subscription |
 | `script/Interactions.s.sol` | Create, fund and add consumers to a VRF subscription |
 | `script/PerformUpkeep.s.sol` | Triggers `performUpkeep` if `checkUpkeep` says it's needed |
+| `script/UpkeepReceiver.s.sol` | Deploys the receiver and switches its CRE forwarder |
+| `cre/raffle-upkeep` | The CRE workflow (TypeScript) |
 | `test/unit`, `test/integration` | Tests; `test/integration/RaffleFlowTest.t.sol` runs whole rounds end to end |
 
 ## Requirements
 
 - [Foundry](https://getfoundry.sh/)
 - [mise](https://mise.jdx.dev/), which runs the project tasks in `mise.toml` (`mise tasks` lists them)
+- For the CRE workflow: [Bun](https://bun.sh/) and the [CRE CLI](https://docs.chain.link/cre/getting-started/cli-installation),
+  logged in with `cre login`
 - For Sepolia only:
   - the [1Password CLI](https://developer.1password.com/docs/cli/) (`op`), which supplies the RPC URL and Etherscan API
     key
@@ -43,6 +49,7 @@ or call it with `cast` instead.
 git clone --recurse-submodules https://github.com/SonicWizard/foundry-smart-contract-lottery.git
 cd foundry-smart-contract-lottery
 mise run build
+mise run cre:install  # the CRE workflow's dependencies
 ```
 
 Local builds and tests need nothing else. For Sepolia, copy `.env.example` to `.env` and fill it in:
@@ -64,6 +71,7 @@ mise run test       # all tests on a local chain, using Chainlink's VRF coordina
 mise run test:fork  # the same tests against a fork of Sepolia
 mise run coverage   # coverage summary
 mise run check      # what CI runs: forge fmt --check, forge build --sizes, forge test
+mise run cre:typecheck  # type-check the CRE workflow
 ```
 
 On a fork, the 8 tests that need the local VRF mock are reported as skipped. The rest deploy against the real Sepolia
@@ -117,6 +125,67 @@ Forge refuses to broadcast.
 
 To add an existing raffle to the subscription again, run `mise run sub:add-consumer:sepolia <raffle-address> <account>`.
 
+## Automating upkeep with Chainlink CRE
+
+Chainlink Automation is being retired in favour of the Chainlink Runtime Environment (CRE). Here a CRE workflow does its
+job:
+
+1. Every minute, `cre/raffle-upkeep` reads `checkUpkeep`. CRE reads at the last finalized block so that every node
+   sees the same state; on Sepolia that is about 13 minutes behind the latest block.
+2. If upkeep is needed, the workflow sends a signed report through Chainlink's forwarder to `RaffleUpkeepReceiver`.
+3. The receiver accepts reports only from that forwarder (and, once set, only from your workflow ID). It checks
+   `checkUpkeep` again and calls `performUpkeep`. A report that is out of date by the time it arrives is skipped
+   instead of reverting.
+
+So once upkeep is due, a draw starts within about 15 minutes.
+
+Deploying the workflow to Chainlink's network needs CRE deploy access: `cre whoami` shows whether you have it, and
+`cre account access` requests it. Until then you can run the workflow yourself with the CRE simulator:
+
+1. Deploy a receiver for your raffle that accepts reports from the simulator's forwarder:
+
+   ```shell
+   mise run deploy:receiver:sepolia <raffle-address> simulation <account>
+   ```
+
+2. Put the raffle and receiver addresses in `cre/raffle-upkeep/config.sepolia.json`.
+3. **Dry run:** `mise run cre:simulate:sepolia` reads Sepolia and prepares the report without sending it.
+4. **Send a report:** add `CRE_ETH_PRIVATE_KEY` to `.env` (a 1Password reference to a key with Sepolia ETH), then run
+   `mise run cre:broadcast:sepolia`. Each run checks once; nothing is scheduled.
+
+Once you have deploy access:
+
+1. Deploy the workflow from `cre/`, following Chainlink's
+   [deploying workflows](https://docs.chain.link/cre/guides/operations/deploying-workflows) guide:
+
+   ```shell
+   op run --env-file=../.env -- cre workflow deploy raffle-upkeep --target sepolia-settings
+   ```
+
+2. Switch the receiver to the production forwarder:
+
+   ```shell
+   mise run receiver:forwarder:sepolia <receiver-address> production <account>
+   ```
+
+3. Restrict the receiver to your workflow, using the workflow ID the deploy printed:
+
+   ```shell
+   op run --env-file=.env -- cast send <receiver-address> "setExpectedWorkflowId(bytes32)" <workflow-id> \
+     --rpc-url sepolia --account <account>
+   ```
+
+To test the whole path without sending anything to Sepolia, run it against a local Anvil fork of Sepolia. The script
+deploys a raffle and receiver on the fork, enters a player, runs the real CRE simulator, and checks that the report
+started a draw and that a second, stale report was skipped:
+
+```shell
+mise run cre:fork      # in one terminal
+mise run cre:e2e:fork  # in another
+```
+
+## Deploying locally
+
 Deploying to a local Anvil node isn't supported. The local config has no subscription ID, and `DeployRaffle` only
 creates one when nothing is broadcast, so locally the raffle runs only inside tests.
 
@@ -124,7 +193,8 @@ creates one when nothing is broadcast, so locally the raffle runs only inside te
 
 - **Tasks:** `mise` tasks instead of a Makefile, with secrets supplied by 1Password through `op run` instead of being
   stored in `.env`.
-- **Upkeep:** triggered with the `PerformUpkeep` script instead of registering the raffle with Chainlink Automation.
+- **Upkeep:** a Chainlink CRE workflow and `RaffleUpkeepReceiver` instead of registering the raffle with Chainlink
+  Automation, which is being retired. The `PerformUpkeep` script remains as a manual fallback.
 - **Local funding:** no solmate or `LinkToken` mock. Locally, the mock coordinator's `fundSubscription` credits the
   subscription directly; only Sepolia uses LINK's `transferAndCall`.
 - **VRF coordinator calls:** scripts call through Chainlink's `IVRFCoordinatorV2Plus` interface instead of the mock's

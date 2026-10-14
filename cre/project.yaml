@@ -1,0 +1,15 @@
+# CRE project settings: the RPC each target reads and writes through.
+# Run cre commands through the mise tasks, which supply SEPOLIA_RPC_URL from 1Password with `op run`.
+
+# Sepolia itself. Simulating with --broadcast sends real transactions.
+sepolia-settings:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: ${SEPOLIA_RPC_URL}
+
+# A local Anvil fork of Sepolia on port 8546 (see `mise run cre:fork`), for end-to-end runs that send nothing to
+# Sepolia. The fork keeps Sepolia's chain ID and contracts, including the CRE simulation forwarder.
+fork-settings:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: http://127.0.0.1:8546

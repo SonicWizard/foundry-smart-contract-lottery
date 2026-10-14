@@ -16,3 +16,8 @@ docs/
 .env
 .env.*
 !.env.example
+
+# CRE workflow dependencies and build output, and the config the fork e2e script writes
+cre/**/node_modules/
+cre/**/.cre_build_tmp.js
+cre/raffle-upkeep/config.fork.json

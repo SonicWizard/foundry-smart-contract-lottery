@@ -73,3 +73,64 @@ arg "<raffle>" help="Address of the deployed Raffle"
 arg "<account>" help="Foundry keystore account to send the transaction from"
 '''
 run = 'op run --env-file=.env -- forge script script/PerformUpkeep.s.sol --sig "run(address)" "$usage_raffle" --rpc-url sepolia --account "$usage_account" --broadcast'
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Chainlink CRE upkeep: a workflow (cre/raffle-upkeep) reads checkUpkeep on a schedule and sends a report to
+# RaffleUpkeepReceiver, which calls performUpkeep. Deploying the workflow needs CRE deploy access (`cre account
+# access`); until then, simulate it.
+
+[tasks."deploy:receiver:sepolia"]
+description = "Deploy a RaffleUpkeepReceiver for a Sepolia Raffle and verify it on Etherscan"
+usage = '''
+arg "<raffle>" help="Address of the deployed Raffle"
+arg "<forwarder>" help="Which CRE forwarder to accept reports from" {
+  choices "simulation" "production"
+}
+arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address in .env"
+'''
+run = '''
+simulation=$([ "$usage_forwarder" = simulation ] && echo true || echo false)
+op run --env-file=.env -- forge script script/UpkeepReceiver.s.sol:DeployUpkeepReceiver --sig "run(address,bool)" "$usage_raffle" "$simulation" --rpc-url sepolia --account "$usage_account" --broadcast --verify --verifier etherscan
+'''
+
+[tasks."receiver:forwarder:sepolia"]
+description = "Switch a Sepolia RaffleUpkeepReceiver between the simulation and production CRE forwarders"
+usage = '''
+arg "<receiver>" help="Address of the RaffleUpkeepReceiver"
+arg "<forwarder>" help="Which CRE forwarder to accept reports from" {
+  choices "simulation" "production"
+}
+arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address in .env"
+'''
+run = '''
+simulation=$([ "$usage_forwarder" = simulation ] && echo true || echo false)
+op run --env-file=.env -- forge script script/UpkeepReceiver.s.sol:SetUpkeepForwarder --sig "run(address,bool)" "$usage_receiver" "$simulation" --rpc-url sepolia --account "$usage_account" --broadcast
+'''
+
+[tasks."cre:install"]
+description = "Install the CRE workflow's dependencies"
+dir = "cre/raffle-upkeep"
+run = "bun install"
+
+[tasks."cre:typecheck"]
+description = "Type-check the CRE workflow"
+dir = "cre/raffle-upkeep"
+run = "bun run typecheck"
+
+[tasks."cre:simulate:sepolia"]
+description = "Dry-run the CRE workflow once against Sepolia (prepares, but does not send, the report)"
+dir = "cre"
+run = "op run --env-file=../.env -- cre workflow simulate raffle-upkeep --target sepolia-settings --non-interactive --trigger-index 0"
+
+[tasks."cre:broadcast:sepolia"]
+description = "Run the CRE workflow once against Sepolia and send its report (needs CRE_ETH_PRIVATE_KEY in .env)"
+dir = "cre"
+run = "op run --env-file=../.env -- cre workflow simulate raffle-upkeep --target sepolia-settings --non-interactive --trigger-index 0 --broadcast"
+
+[tasks."cre:fork"]
+description = "Start a local Anvil fork of Sepolia on port 8546 for cre:e2e:fork"
+run = '''op run --env-file=.env -- sh -c 'exec anvil --fork-url "$SEPOLIA_RPC_URL" --port 8546 --auto-impersonate' '''
+
+[tasks."cre:e2e:fork"]
+description = "End-to-end CRE upkeep check on the local fork (run cre:fork first); sends nothing to Sepolia"
+run = "cre/scripts/fork-e2e.sh"

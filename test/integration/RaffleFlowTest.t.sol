@@ -5,11 +5,14 @@ import {Vm} from "forge-std/Vm.sol";
 import {DeployRaffle} from "../../script/DeployRaffle.s.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {PerformUpkeep} from "../../script/PerformUpkeep.s.sol";
+import {DeployUpkeepReceiver} from "../../script/UpkeepReceiver.s.sol";
 import {Raffle} from "../../src/Raffle.sol";
+import {RaffleUpkeepReceiver} from "../../src/RaffleUpkeepReceiver.sol";
 import {IVRFCoordinatorV2_5Mock} from "../mocks/IVRFCoordinatorV2_5Mock.sol";
 import {SkipForkTest} from "../utils/SkipForkTest.sol";
 
-/// @dev Runs whole raffle rounds the way they happen in practice: deploy script, entries, upkeep script, VRF answer.
+/// @dev Runs whole raffle rounds the way they happen in practice: deploy scripts, entries, upkeep (by the script or a
+/// CRE report), VRF answer.
 contract RaffleFlowTest is SkipForkTest {
     uint256 private constant STARTING_PLAYER_BALANCE = 10 ether;
     uint256 private constant FIRST_ROUND_PLAYERS = 4;
@@ -17,6 +20,8 @@ contract RaffleFlowTest is SkipForkTest {
 
     Raffle private raffle;
     PerformUpkeep private performUpkeep;
+    RaffleUpkeepReceiver private receiver;
+    address private creForwarder;
     IVRFCoordinatorV2_5Mock private vrfCoordinator;
     uint256 private entranceFee;
     uint256 private interval;
@@ -29,6 +34,8 @@ contract RaffleFlowTest is SkipForkTest {
         entranceFee = config.entranceFee;
         interval = config.interval;
         performUpkeep = new PerformUpkeep();
+        receiver = new DeployUpkeepReceiver().run(address(raffle), false);
+        creForwarder = config.creForwarder;
     }
 
     function test_RunsTwoRoundsWithMultiplePlayers() external skipFork {
@@ -39,26 +46,28 @@ contract RaffleFlowTest is SkipForkTest {
         assertEq(consumers.length, 1);
         assertEq(consumers[0], address(raffle));
 
+        // Round one is triggered by the PerformUpkeep script, the manual fallback.
         address[] memory firstRound = newPlayers("first", FIRST_ROUND_PLAYERS);
-        address firstWinner = playRound(firstRound, 2, subscriptionId);
+        address firstWinner = playRound(firstRound, 2, subscriptionId, false);
 
-        // The first winner plays again with new players and wins only this round's prize, so nothing from round one
-        // (players or ETH) may be left behind.
+        // Round two is triggered by a CRE report. The first winner plays again with new players and wins only this
+        // round's prize, so nothing from round one (players or ETH) may be left behind.
         address[] memory newcomers = newPlayers("second", SECOND_ROUND_NEW_PLAYERS);
         address[] memory secondRound = new address[](SECOND_ROUND_NEW_PLAYERS + 1);
         secondRound[0] = firstWinner;
         for (uint256 i = 0; i < newcomers.length; i++) {
             secondRound[i + 1] = newcomers[i];
         }
-        playRound(secondRound, 0, subscriptionId);
+        playRound(secondRound, 0, subscriptionId, true);
     }
 
     /*//////////////////////////////////////////////////////////////
                                 HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Enters `players`, triggers upkeep through the script and has the mock pick `players[winnerIndex]`.
-    function playRound(address[] memory players, uint256 winnerIndex, uint256 subscriptionId)
+    /// @dev Enters `players`, triggers upkeep (through the CRE receiver if `viaCre`, else the script) and has the mock
+    /// pick `players[winnerIndex]`.
+    function playRound(address[] memory players, uint256 winnerIndex, uint256 subscriptionId, bool viaCre)
         private
         returns (address winner)
     {
@@ -70,13 +79,13 @@ contract RaffleFlowTest is SkipForkTest {
         assertEq(address(raffle).balance, prize);
         assertEq(raffle.getPlayers().length, players.length);
 
-        // Upkeep isn't due until the interval has passed.
-        performUpkeep.run(address(raffle));
+        // Upkeep isn't due until the interval has passed, so an early trigger (or a stale CRE report) does nothing.
+        triggerUpkeep(viaCre);
         assertEq(uint256(raffle.getRaffleState()), uint256(Raffle.RaffleState.OPEN));
 
         vm.warp(vm.getBlockTimestamp() + interval + 1);
         vm.roll(vm.getBlockNumber() + 1);
-        uint256 requestId = performUpkeepAndGetRequestId();
+        uint256 requestId = performUpkeepAndGetRequestId(viaCre);
         assertEq(uint256(raffle.getRaffleState()), uint256(Raffle.RaffleState.CALCULATING));
 
         winner = players[winnerIndex];
@@ -109,10 +118,20 @@ contract RaffleFlowTest is SkipForkTest {
         }
     }
 
-    /// @dev Runs the upkeep script and returns the request ID from the Raffle's `RequestedRaffleWinner` event.
-    function performUpkeepAndGetRequestId() private returns (uint256) {
+    /// @dev Delivers a CRE report to the receiver as the forwarder if `viaCre`, else runs the upkeep script.
+    function triggerUpkeep(bool viaCre) private {
+        if (viaCre) {
+            vm.prank(creForwarder);
+            receiver.onReport("", abi.encode(address(raffle)));
+        } else {
+            performUpkeep.run(address(raffle));
+        }
+    }
+
+    /// @dev Triggers upkeep and returns the request ID from the Raffle's `RequestedRaffleWinner` event.
+    function performUpkeepAndGetRequestId(bool viaCre) private returns (uint256) {
         vm.recordLogs();
-        performUpkeep.run(address(raffle));
+        triggerUpkeep(viaCre);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].emitter == address(raffle) && logs[i].topics[0] == Raffle.RequestedRaffleWinner.selector) {

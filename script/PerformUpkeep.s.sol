@@ -7,7 +7,7 @@ import {Raffle} from "../src/Raffle.sol";
 /**
  * @title PerformUpkeep
  * @author SonicWizard
- * @notice Manually triggers a raffle's `performUpkeep`, standing in for the retired Chainlink Automation network.
+ * @notice Manually triggers a raffle's `performUpkeep`; the fallback for the CRE workflow (see RaffleUpkeepReceiver).
  * @dev Usage: forge script script/PerformUpkeep.s.sol --sig "run(address)" <raffle> --rpc-url <url> --account <acct>
  * --broadcast
  */

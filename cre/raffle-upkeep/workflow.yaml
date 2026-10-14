@@ -1,0 +1,17 @@
+# CRE workflow settings for each target in ../project.yaml.
+
+sepolia-settings:
+  user-workflow:
+    workflow-name: "raffle-upkeep"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.sepolia.json"
+    secrets-path: ""
+
+fork-settings:
+  user-workflow:
+    workflow-name: "raffle-upkeep-fork"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.fork.json"
+    secrets-path: ""
