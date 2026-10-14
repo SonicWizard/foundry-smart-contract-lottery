@@ -1,0 +1,75 @@
+# Project tasks. List them with `mise tasks`, run one with `mise run <task>`.
+# Tasks that talk to Sepolia go through `op run`, which resolves the 1Password references in `.env`
+# for that one command only.
+
+[tasks.build]
+description = "Compile the contracts"
+run = "forge build"
+
+[tasks.test]
+description = "Run all tests on a local chain"
+run = "forge test"
+
+[tasks.fmt]
+description = "Format all Solidity files"
+run = "forge fmt"
+
+[tasks.check]
+description = "Run the same checks as CI: formatting, build and tests"
+run = ["forge fmt --check", "forge build --sizes", "forge test -vvv"]
+
+[tasks.coverage]
+description = "Show test coverage"
+run = "forge coverage --report summary"
+
+[tasks."rpc:check"]
+description = "Check the Sepolia RPC URL works (prints 11155111)"
+run = "op run --env-file=.env -- cast chain-id --rpc-url sepolia"
+
+[tasks."test:fork"]
+description = "Run the tests against a fork of Sepolia"
+run = "op run --env-file=.env -- forge test --fork-url sepolia"
+
+[tasks."sub:create:sepolia"]
+description = "Create a VRF subscription on Sepolia and print its real ID"
+usage = 'arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address in .env"'
+# The ID logged during simulation differs from the on-chain one, so read it from the SubscriptionCreated event.
+run = '''
+set -e
+op run --env-file=.env -- forge script script/Interactions.s.sol:CreateSubscription --rpc-url sepolia --account "$usage_account" --broadcast
+topic=$(jq -r '.receipts[].logs[] | select(.topics[0] == "0x1d3015d7ba850fa198dc7b1a3f5d42779313a681035f77c8c03764c61005518d") | .topics[1]' broadcast/Interactions.s.sol/11155111/run-latest.json)
+echo
+echo "Subscription ID: $(cast to-dec "$topic")"
+echo "Set it as SEPOLIA_SUBSCRIPTION_ID in .env, then fund it with mise run sub:fund:sepolia."
+'''
+
+[tasks."sub:fund:sepolia"]
+description = "Send LINK from your account to the Sepolia subscription in SEPOLIA_SUBSCRIPTION_ID"
+usage = '''
+arg "<amount>" help="Amount of LINK to send, such as 5 or 2.5"
+arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address in .env"
+'''
+run = 'op run --env-file=.env -- forge script script/Interactions.s.sol:FundSubscription --sig "run(uint256)" "$(cast to-wei "$usage_amount")" --rpc-url sepolia --account "$usage_account" --broadcast'
+
+[tasks."sub:add-consumer:sepolia"]
+description = "Add a contract as a consumer of the Sepolia subscription in SEPOLIA_SUBSCRIPTION_ID"
+usage = '''
+arg "<consumer>" help="Address of the contract that requests randomness"
+arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address in .env"
+'''
+run = 'op run --env-file=.env -- forge script script/Interactions.s.sol:AddConsumer --sig "run(address)" "$usage_consumer" --rpc-url sepolia --account "$usage_account" --broadcast'
+
+# `--verifier etherscan` makes a missing ETHERSCAN_API_KEY fail before broadcasting; without it, Forge deploys and then
+# falls back to verifying on Sourcify.
+[tasks."deploy:sepolia"]
+description = "Deploy the Raffle to Sepolia and verify it on Etherscan"
+usage = 'arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address in .env"'
+run = 'op run --env-file=.env -- forge script script/DeployRaffle.s.sol --rpc-url sepolia --account "$usage_account" --broadcast --verify --verifier etherscan'
+
+[tasks."upkeep:sepolia"]
+description = "Pick a winner on a deployed Sepolia Raffle, if upkeep is needed"
+usage = '''
+arg "<raffle>" help="Address of the deployed Raffle"
+arg "<account>" help="Foundry keystore account to send the transaction from"
+'''
+run = 'op run --env-file=.env -- forge script script/PerformUpkeep.s.sol --sig "run(address)" "$usage_raffle" --rpc-url sepolia --account "$usage_account" --broadcast'
