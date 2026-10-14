@@ -13,9 +13,10 @@ A provably fair raffle built with [Foundry](https://getfoundry.sh/), using
 4. The coordinator calls back `fulfillRandomWords`, which picks the winner, resets the raffle for the next round and
    sends the winner the whole balance.
 
-A [Chainlink CRE](https://docs.chain.link/cre) workflow calls `performUpkeep` when it's due, in place of Chainlink
-Automation (see [Automating upkeep with Chainlink CRE](#automating-upkeep-with-chainlink-cre)). Anyone can also call it
-by hand with the `PerformUpkeep` script (`mise run upkeep:sepolia`) or `cast`.
+The project includes a [Chainlink CRE](https://docs.chain.link/cre) workflow that calls `performUpkeep` when it's due,
+in place of Chainlink Automation (see [Automating upkeep with Chainlink CRE](#automating-upkeep-with-chainlink-cre)).
+Deploying it is a paid Chainlink service, so for now draws are triggered by hand: anyone can call `performUpkeep` with
+the `PerformUpkeep` script (`mise run upkeep:sepolia`) or `cast`.
 
 | Path | Contents |
 | --- | --- |
@@ -137,10 +138,13 @@ job:
    `checkUpkeep` again and calls `performUpkeep`. A report that is out of date by the time it arrives is skipped
    instead of reverting.
 
-So once upkeep is due, a draw starts within about 15 minutes.
+So once the workflow is deployed and upkeep is due, a draw starts within about 15 minutes.
 
 Deploying the workflow to Chainlink's network needs CRE deploy access: `cre whoami` shows whether you have it, and
-`cre account access` requests it. Until then you can run the workflow yourself with the CRE simulator:
+`cre account access` requests it. It is also a paid Chainlink service, so check with Chainlink before deploying. This
+project isn't deployed to CRE; draws are triggered with `mise run upkeep:sepolia` instead.
+
+The CRE simulator is free and needs no deploy access, so you can still run the workflow yourself:
 
 1. Deploy a receiver for your raffle that accepts reports from the simulator's forwarder:
 
