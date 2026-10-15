@@ -1,6 +1,14 @@
 # Project tasks. List them with `mise tasks`, run one with `mise run <task>`.
 # Tasks that talk to Sepolia go through `op run`, which resolves the 1Password references in `.env`
 # for that one command only.
+#
+# Scripts that broadcast to Sepolia pass `--slow`, which waits for each transaction to be mined before sending the next.
+# Nodes accept only one pending transaction at a time from an account with an EIP-7702 delegation (such as a MetaMask
+# smart account), so sending them all at once fails with "in-flight transaction limit reached for delegated accounts".
+#
+# They also pass `--gas-estimate-multiplier 1000`. Since the Glamsterdam fork (6 October 2026), Sepolia charges up to
+# 7.65x more for creating contracts, accounts and storage (EIP-8037), but Forge 1.8 still simulates with Osaka gas
+# costs, so its default 130% limit runs out of gas. 10x covers the worst case; only the gas actually used is paid for.
 
 [tasks.build]
 description = "Compile the contracts"
@@ -36,7 +44,7 @@ usage = 'arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT 
 # The ID logged during simulation differs from the on-chain one, so read it from the SubscriptionCreated event.
 run = '''
 set -e
-op run --env-file=.env -- forge script script/Interactions.s.sol:CreateSubscription --rpc-url sepolia --account "$usage_account" --broadcast
+op run --env-file=.env -- forge script script/Interactions.s.sol:CreateSubscription --rpc-url sepolia --account "$usage_account" --broadcast --slow --gas-estimate-multiplier 1000
 topic=$(jq -r '.receipts[].logs[] | select(.topics[0] == "0x1d3015d7ba850fa198dc7b1a3f5d42779313a681035f77c8c03764c61005518d") | .topics[1]' broadcast/Interactions.s.sol/11155111/run-latest.json)
 echo
 echo "Subscription ID: $(cast to-dec "$topic")"
@@ -49,7 +57,7 @@ usage = '''
 arg "<amount>" help="Amount of LINK to send, such as 5 or 2.5"
 arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address in .env"
 '''
-run = 'op run --env-file=.env -- forge script script/Interactions.s.sol:FundSubscription --sig "run(uint256)" "$(cast to-wei "$usage_amount")" --rpc-url sepolia --account "$usage_account" --broadcast'
+run = 'op run --env-file=.env -- forge script script/Interactions.s.sol:FundSubscription --sig "run(uint256)" "$(cast to-wei "$usage_amount")" --rpc-url sepolia --account "$usage_account" --broadcast --slow --gas-estimate-multiplier 1000'
 
 [tasks."sub:add-consumer:sepolia"]
 description = "Add a contract as a consumer of the Sepolia subscription in SEPOLIA_SUBSCRIPTION_ID"
@@ -57,14 +65,14 @@ usage = '''
 arg "<consumer>" help="Address of the contract that requests randomness"
 arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address in .env"
 '''
-run = 'op run --env-file=.env -- forge script script/Interactions.s.sol:AddConsumer --sig "run(address)" "$usage_consumer" --rpc-url sepolia --account "$usage_account" --broadcast'
+run = 'op run --env-file=.env -- forge script script/Interactions.s.sol:AddConsumer --sig "run(address)" "$usage_consumer" --rpc-url sepolia --account "$usage_account" --broadcast --slow --gas-estimate-multiplier 1000'
 
 # `--verifier etherscan` makes a missing ETHERSCAN_API_KEY fail before broadcasting; without it, Forge deploys and then
 # falls back to verifying on Sourcify.
 [tasks."deploy:sepolia"]
 description = "Deploy the Raffle to Sepolia and verify it on Etherscan"
 usage = 'arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address in .env"'
-run = 'op run --env-file=.env -- forge script script/DeployRaffle.s.sol --rpc-url sepolia --account "$usage_account" --broadcast --verify --verifier etherscan'
+run = 'op run --env-file=.env -- forge script script/DeployRaffle.s.sol --rpc-url sepolia --account "$usage_account" --broadcast --slow --gas-estimate-multiplier 1000 --verify --verifier etherscan'
 
 [tasks."upkeep:sepolia"]
 description = "Pick a winner on a deployed Sepolia Raffle, if upkeep is needed"
@@ -72,7 +80,7 @@ usage = '''
 arg "<raffle>" help="Address of the deployed Raffle"
 arg "<account>" help="Foundry keystore account to send the transaction from"
 '''
-run = 'op run --env-file=.env -- forge script script/PerformUpkeep.s.sol --sig "run(address)" "$usage_raffle" --rpc-url sepolia --account "$usage_account" --broadcast'
+run = 'op run --env-file=.env -- forge script script/PerformUpkeep.s.sol --sig "run(address)" "$usage_raffle" --rpc-url sepolia --account "$usage_account" --broadcast --slow --gas-estimate-multiplier 1000'
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Chainlink CRE upkeep: a workflow (cre/raffle-upkeep) reads checkUpkeep on a schedule and sends a report to
@@ -90,7 +98,7 @@ arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address i
 '''
 run = '''
 simulation=$([ "$usage_forwarder" = simulation ] && echo true || echo false)
-op run --env-file=.env -- forge script script/UpkeepReceiver.s.sol:DeployUpkeepReceiver --sig "run(address,bool)" "$usage_raffle" "$simulation" --rpc-url sepolia --account "$usage_account" --broadcast --verify --verifier etherscan
+op run --env-file=.env -- forge script script/UpkeepReceiver.s.sol:DeployUpkeepReceiver --sig "run(address,bool)" "$usage_raffle" "$simulation" --rpc-url sepolia --account "$usage_account" --broadcast --slow --gas-estimate-multiplier 1000 --verify --verifier etherscan
 '''
 
 [tasks."receiver:forwarder:sepolia"]
@@ -104,7 +112,7 @@ arg "<account>" help="Foundry keystore account for the SEPOLIA_ACCOUNT address i
 '''
 run = '''
 simulation=$([ "$usage_forwarder" = simulation ] && echo true || echo false)
-op run --env-file=.env -- forge script script/UpkeepReceiver.s.sol:SetUpkeepForwarder --sig "run(address,bool)" "$usage_receiver" "$simulation" --rpc-url sepolia --account "$usage_account" --broadcast
+op run --env-file=.env -- forge script script/UpkeepReceiver.s.sol:SetUpkeepForwarder --sig "run(address,bool)" "$usage_receiver" "$simulation" --rpc-url sepolia --account "$usage_account" --broadcast --slow --gas-estimate-multiplier 1000
 '''
 
 [tasks."cre:install"]
