@@ -98,10 +98,14 @@ Forge refuses to broadcast.
 
    Forge's simulated run logs a different ID from the real one; the task reads the real ID from the transaction.
 
-2. **Fund it with LINK**, for example 5 LINK:
+2. **Fund it with LINK.** Before answering a request, the VRF node checks that the subscription could pay for it
+   at the gas lane's maximum price (500 gwei on Sepolia), not the actual one. With this raffle's 500,000 callback gas
+   limit, that reserve is about 80 LINK, depending on the LINK/ETH price. A fulfilment actually costs about 0.01 LINK
+   at Sepolia's gas prices, so the reserve isn't spent, but below it requests wait unanswered. Fund about 90 LINK to
+   allow for price changes (the [faucet](https://faucets.chain.link/sepolia) gives 25 at a time):
 
    ```shell
-   mise run sub:fund:sepolia 5 <account>
+   mise run sub:fund:sepolia 90 <account>
    ```
 
 3. **Deploy the raffle.** This also adds it as a consumer of the subscription and verifies the source on Etherscan:
@@ -158,6 +162,9 @@ op run --env-file=.env -- sh -c 'cast send 0x9DdfaCa8183c41ad55329BdeeD9F6A8d531
 - **"in-flight transaction limit reached for delegated accounts".** Your account has an EIP-7702 delegation and Forge
   sent several transactions at once. The tasks pass `--slow` to prevent this; add it to any `forge script` you run
   by hand.
+- **The raffle stays in `CALCULATING` and the winner is never picked.** Check the subscription's balance against the
+  reserve in step 2. A request waits until the subscription can cover it, then is answered within a block or two of
+  funding it; normally the answer arrives one to two minutes after `performUpkeep`.
 - **"Failed to decrypt keystore: incorrect password".** Forge asks for the password after simulating, so nothing was
   sent. Run the task again.
 
