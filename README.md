@@ -222,9 +222,33 @@ creates one when nothing is broadcast, so locally the raffle runs only inside te
   deployment with `foundry-devops`, so no `fs_permissions` are needed.
 - **Payout:** winners withdraw their prize with `withdrawWinnings` instead of being sent it by `fulfillRandomWords`
   (see [Why winners withdraw their prize](#why-winners-withdraw-their-prize)).
+- **Resetting a round:** the raffle counts the current round's players and overwrites earlier rounds' entries, instead
+  of clearing the players array (see [Gas on Sepolia](#gas-on-sepolia)).
 - **Tests:** every script is tested, a two-round end-to-end test runs whole rounds with several players, and coverage
   is 100% for lines and branches. Tests that need the local VRF mock are reported as skipped on a fork rather than
   passing without running.
+
+## Gas on Sepolia
+
+Sepolia activated the Glamsterdam fork on 6 October 2026. Its EIP-8037 makes creating contracts, accounts and storage
+several times more expensive, which affects this project in three ways:
+
+- **Forge underestimates gas.** Forge 1.8 still simulates with Osaka gas costs, so its usual gas limit (130% of its
+  estimate) runs out of gas on Sepolia. The Sepolia tasks in `mise.toml` pass `--gas-estimate-multiplier 1000`; the
+  limit is only a ceiling, so you pay only for the gas actually used. The tests also run with Osaka costs, so they
+  can't show what a transaction costs on Sepolia; ask the node with `cast estimate` instead.
+- **The VRF callback must not grow with the number of players.** Clearing the players array at the end of a round
+  cost about 12k gas per player on Sepolia, so with around 27 players `fulfillRandomWords` would exceed its 500k
+  callback gas limit. VRF doesn't retry a failed callback, so the raffle would be stuck in `CALCULATING`. The raffle
+  now keeps a player count instead: a round resets with a single write, and later rounds overwrite the old entries,
+  which is also cheaper for players than creating new storage. `test_CallbackGasDoesNotGrowWithPlayers` checks this.
+- **CRE needs more gas.** `performUpkeep` alone needs about 300k gas on Sepolia, so the workflow's `writeGasLimit`
+  is 1,000,000.
+
+The Sepolia tasks also pass `--slow`, so Forge waits for each transaction before sending the next. Nodes accept only
+one pending transaction from an account with an EIP-7702 delegation (such as a MetaMask smart account), and without
+`--slow` a script that sends several transactions fails with "in-flight transaction limit reached for delegated
+accounts".
 
 ## Why winners withdraw their prize
 

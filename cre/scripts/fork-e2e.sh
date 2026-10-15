@@ -56,7 +56,7 @@ cat >"$config" <<EOF
   "raffleAddress": "$raffle",
   "receiverAddress": "$receiver",
   "schedule": "0 */1 * * * *",
-  "writeGasLimit": "500000"
+  "writeGasLimit": "1000000"
 }
 EOF
 

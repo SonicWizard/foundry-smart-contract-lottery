@@ -3,5 +3,5 @@
   "raffleAddress": "0x0000000000000000000000000000000000000000",
   "receiverAddress": "0x0000000000000000000000000000000000000000",
   "schedule": "0 */1 * * * *",
-  "writeGasLimit": "500000"
+  "writeGasLimit": "1000000"
 }

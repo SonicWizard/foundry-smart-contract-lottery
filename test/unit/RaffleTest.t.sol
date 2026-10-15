@@ -12,6 +12,8 @@ import {SkipForkTest} from "../utils/SkipForkTest.sol";
 contract RaffleTest is SkipForkTest {
     uint256 private constant STARTING_PLAYER_BALANCE = 10 ether;
     uint256 private constant ADDITIONAL_PLAYERS = 3;
+    /// @dev Enough players that clearing them one slot at a time would exceed the 500k callback gas limit on Sepolia.
+    uint256 private constant MANY_PLAYERS = 50;
 
     Raffle private raffle;
     uint256 private entranceFee;
@@ -205,6 +207,34 @@ contract RaffleTest is SkipForkTest {
         assertEq(raffle.getWinnings(player), entranceFee);
     }
 
+    function test_CallbackGasDoesNotGrowWithPlayers() external {
+        uint256 gasWithOnePlayer = enterPlayersAndMeasureCallbackGas(1, "few");
+        uint256 gasWithManyPlayers = enterPlayersAndMeasureCallbackGas(MANY_PLAYERS, "many");
+        // The request IDs differ, which shifts the cost by a few gas; clearing even one slot would cost thousands.
+        assertApproxEqAbs(gasWithManyPlayers, gasWithOnePlayer, 100);
+    }
+
+    function test_NewRoundOnlyIncludesItsOwnPlayers() external raffleEntered {
+        for (uint256 i = 1; i <= ADDITIONAL_PLAYERS; i++) {
+            hoax(makeAddr(string.concat("player", vm.toString(i))), STARTING_PLAYER_BALANCE);
+            raffle.enterRaffle{value: entranceFee}();
+        }
+        pickWinner(performUpkeepAndGetRequestId(), 0);
+
+        // The newcomer reuses the first slot; the slots left over from round one must not count as players.
+        address newcomer = makeAddr("newcomer");
+        hoax(newcomer, STARTING_PLAYER_BALANCE);
+        raffle.enterRaffle{value: entranceFee}();
+        address payable[] memory players = raffle.getPlayers();
+        assertEq(players.length, 1);
+        assertEq(players[0], newcomer);
+
+        vm.warp(vm.getBlockTimestamp() + interval + 1);
+        vm.roll(vm.getBlockNumber() + 1);
+        pickWinner(performUpkeepAndGetRequestId(), ADDITIONAL_PLAYERS);
+        assertEq(raffle.getWinnings(newcomer), entranceFee);
+    }
+
     /*//////////////////////////////////////////////////////////////
                            WITHDRAW WINNINGS
     //////////////////////////////////////////////////////////////*/
@@ -277,6 +307,25 @@ contract RaffleTest is SkipForkTest {
             }
         }
         revert("RequestedRaffleWinner not emitted");
+    }
+
+    /// @dev Enters `count` new players, starts a draw and returns the gas `fulfillRandomWords` uses, with the raffle's
+    /// storage cold as it would be in the coordinator's transaction.
+    function enterPlayersAndMeasureCallbackGas(uint256 count, string memory prefix) private returns (uint256) {
+        for (uint256 i = 0; i < count; i++) {
+            hoax(makeAddr(string.concat(prefix, vm.toString(i))), STARTING_PLAYER_BALANCE);
+            raffle.enterRaffle{value: entranceFee}();
+        }
+        vm.warp(vm.getBlockTimestamp() + interval + 1);
+        vm.roll(vm.getBlockNumber() + 1);
+        uint256 requestId = performUpkeepAndGetRequestId();
+
+        uint256[] memory randomWords = new uint256[](1);
+        vm.cool(address(raffle));
+        vm.prank(vrfCoordinator);
+        uint256 gasBefore = gasleft();
+        raffle.rawFulfillRandomWords(requestId, randomWords);
+        return gasBefore - gasleft();
     }
 
     /// @dev Answers `requestId` as the coordinator. Unlike the local mock, which swallows the raffle's reverts, this

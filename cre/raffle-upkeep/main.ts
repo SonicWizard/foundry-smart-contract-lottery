@@ -34,7 +34,8 @@ const configSchema = z.object({
   receiverAddress: address,
   // Cron expression with seconds; CRE's shortest interval is 30 seconds.
   schedule: z.string(),
-  // Gas for the forwarder's call into the receiver, which runs performUpkeep and the VRF request.
+  // Gas for the forwarder's call into the receiver, which runs performUpkeep and the VRF request. Sepolia needs about
+  // 300k for performUpkeep alone since the Glamsterdam fork, plus the forwarder's own checks and storage.
   writeGasLimit: z.string(),
 });
 type Config = z.infer<typeof configSchema>;

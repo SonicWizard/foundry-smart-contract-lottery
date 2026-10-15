@@ -30,7 +30,10 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
     uint256 private immutable i_subscriptionId;
     uint32 private immutable i_callbackGasLimit;
     uint256 private s_lastTimeStamp;
+    /// @dev Only the first `s_playerCount` entries belong to the current round. Later entries are left over from earlier
+    /// rounds and are overwritten as players enter, so a round resets in one write instead of clearing every slot.
     address payable[] private s_players;
+    uint256 private s_playerCount;
     RaffleState private s_raffleState;
     uint256 private s_prizePool;
     mapping(address winner => uint256 amount) private s_winnings;
@@ -77,7 +80,13 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
     function enterRaffle() external payable {
         require(msg.value >= i_entranceFee, Raffle__NotEnoughEth());
         require(s_raffleState == RaffleState.OPEN, Raffle__RaffleNotOpen());
-        s_players.push(payable(msg.sender));
+        uint256 playerCount = s_playerCount;
+        if (playerCount < s_players.length) {
+            s_players[playerCount] = payable(msg.sender);
+        } else {
+            s_players.push(payable(msg.sender));
+        }
+        s_playerCount = playerCount + 1;
         s_prizePool += msg.value;
         emit RaffleEntered(msg.sender);
     }
@@ -93,7 +102,7 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
         external
     {
         (bool upkeepNeeded,) = checkUpkeep("");
-        require(upkeepNeeded, Raffle__UpkeepNotNeeded(s_prizePool, s_players.length, s_raffleState));
+        require(upkeepNeeded, Raffle__UpkeepNotNeeded(s_prizePool, s_playerCount, s_raffleState));
         s_lastTimeStamp = block.timestamp;
         s_raffleState = RaffleState.CALCULATING;
 
@@ -191,7 +200,7 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
     {
         bool isOpen = s_raffleState == RaffleState.OPEN;
         bool timeHasPassed = block.timestamp - s_lastTimeStamp >= i_interval;
-        bool hasPlayers = s_players.length > 0;
+        bool hasPlayers = s_playerCount > 0;
         bool hasBalance = s_prizePool > 0;
         upkeepNeeded = isOpen && timeHasPassed && hasPlayers && hasBalance;
         return (upkeepNeeded, "");
@@ -202,18 +211,24 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
      * @return The list of player addresses.
      */
     function getPlayers() public view returns (address payable[] memory) {
-        return s_players;
+        uint256 playerCount = s_playerCount;
+        address payable[] memory players = new address payable[](playerCount);
+        for (uint256 i = 0; i < playerCount; i++) {
+            players[i] = s_players[i];
+        }
+        return players;
     }
 
     /// @dev Credits the prize instead of sending it, so this callback makes no external call and can't be made to
-    /// revert by the winner. A revert here would leave the raffle stuck in `CALCULATING`.
+    /// revert by the winner. Its gas use doesn't depend on the number of players, so it always fits within
+    /// `i_callbackGasLimit`. A revert or out-of-gas here would leave the raffle stuck in `CALCULATING`.
     function fulfillRandomWords(uint256, uint256[] calldata randomWords) internal override {
-        uint256 winnerIndex = randomWords[0] % s_players.length;
+        uint256 winnerIndex = randomWords[0] % s_playerCount;
         address payable winner = s_players[winnerIndex];
 
         s_winnings[winner] += s_prizePool;
         s_prizePool = 0;
-        s_players = new address payable[](0);
+        s_playerCount = 0;
         s_lastTimeStamp = block.timestamp;
         s_raffleState = RaffleState.OPEN;
 
