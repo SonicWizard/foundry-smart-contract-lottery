@@ -68,7 +68,9 @@ Local builds and tests need nothing else. For Sepolia, copy `.env.example` to `.
 | `SEPOLIA_SUBSCRIPTION_ID` | Your VRF subscription ID. Leave it empty until you create one (see below). |
 
 `.env` is ignored by git. The Sepolia tasks run through `op run --env-file=.env`, which reads the secrets only for
-that command. Check the RPC URL with `mise run rpc:check`, which should print `11155111`.
+that command. Forge does write the resolved RPC URL, including any API key in it, to `cache/<script>/<chain-id>/` when
+it broadcasts ("Sensitive values saved to"). `cache/` is ignored by git, but the key is on disk in plain text. Check
+the RPC URL with `mise run rpc:check`, which should print `11155111`.
 
 ## Testing
 
@@ -108,8 +110,10 @@ Forge refuses to broadcast.
    mise run deploy:sepolia <account>
    ```
 
-   If `ETHERSCAN_API_KEY` is missing, the task stops before sending anything. If the deployment succeeds but
-   verification fails (Etherscan can be slow to index a new contract), verify it again without redeploying:
+   If `ETHERSCAN_API_KEY` is missing, the task stops before sending anything. Forge also submits the source to
+   Sourcify. Etherscan can take several minutes to index a new contract; until it does, verification fails with
+   "Could not detect deployment: Unable to locate ContractCode" or "Contract was not found", even though the
+   deployment succeeded. Wait until Etherscan shows the contract's code, then verify it without redeploying:
 
    ```shell
    op run --env-file=.env -- forge verify-contract <raffle-address> src/Raffle.sol:Raffle --chain sepolia \
@@ -137,6 +141,25 @@ Forge refuses to broadcast.
    ```
 
 To add an existing raffle to the subscription again, run `mise run sub:add-consumer:sepolia <raffle-address> <account>`.
+After replacing a raffle, remove the old one from the subscription:
+
+```shell
+op run --env-file=.env -- sh -c 'cast send 0x9DdfaCa8183c41ad55329BdeeD9F6A8d53168B1B \
+  "removeConsumer(uint256,address)" "$SEPOLIA_SUBSCRIPTION_ID" <old-raffle-address> \
+  --rpc-url "$SEPOLIA_RPC_URL" --account <account>'
+```
+
+### Troubleshooting
+
+- **A task seems stuck after sending.** Forge may be waiting on transactions that have already failed. Look up each
+  hash from `broadcast/<script>/11155111/run-latest.json` with `cast receipt <hash> --rpc-url sepolia` (through
+  `op run`). Status 0 with `gasUsed` equal to the transaction's gas limit means it ran out of gas; see
+  [Gas on Sepolia](#gas-on-sepolia).
+- **"in-flight transaction limit reached for delegated accounts".** Your account has an EIP-7702 delegation and Forge
+  sent several transactions at once. The tasks pass `--slow` to prevent this; add it to any `forge script` you run
+  by hand.
+- **"Failed to decrypt keystore: incorrect password".** Forge asks for the password after simulating, so nothing was
+  sent. Run the task again.
 
 ## Automating upkeep with Chainlink CRE
 
