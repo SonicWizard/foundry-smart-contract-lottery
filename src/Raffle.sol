@@ -12,7 +12,8 @@ import {
  * @author SonicWizard
  * @notice This contract manages a raffle where players can enter and a winner is selected.
  * @dev Picking a winner is triggered through `performUpkeep`, which anyone may call once `checkUpkeep` passes
- * (e.g. a Chainlink CRE workflow, a script, or `cast send`).
+ * (e.g. a Chainlink CRE workflow, a script, or `cast send`). Winners are credited rather than paid, and collect their
+ * prize with `withdrawWinnings`, so a winner that can't receive ETH can't stop the raffle.
  */
 contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
     enum RaffleState {
@@ -31,15 +32,19 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
     uint256 private s_lastTimeStamp;
     address payable[] private s_players;
     RaffleState private s_raffleState;
+    uint256 private s_prizePool;
+    mapping(address winner => uint256 amount) private s_winnings;
 
     event RaffleEntered(address indexed player);
     event WinnerPicked(address indexed winner);
     event RequestedRaffleWinner(uint256 indexed requestId);
+    event WinningsWithdrawn(address indexed winner, uint256 amount);
 
     error Raffle__NotEnoughEth();
     error Raffle__TransferFailed();
     error Raffle__RaffleNotOpen();
-    error Raffle__UpkeepNotNeeded(uint256 balance, uint256 playersLength, RaffleState raffleState);
+    error Raffle__NoWinnings();
+    error Raffle__UpkeepNotNeeded(uint256 prizePool, uint256 playersLength, RaffleState raffleState);
 
     /**
      * @param entranceFee The fee required to enter the raffle, in wei.
@@ -73,13 +78,14 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
         require(msg.value >= i_entranceFee, Raffle__NotEnoughEth());
         require(s_raffleState == RaffleState.OPEN, Raffle__RaffleNotOpen());
         s_players.push(payable(msg.sender));
+        s_prizePool += msg.value;
         emit RaffleEntered(msg.sender);
     }
 
     /**
      * @notice Requests randomness from Chainlink VRF to pick a winner from the current players.
      * @dev Callable by anyone, so it re-validates `checkUpkeep` and reverts if no upkeep is needed.
-     * The winner is chosen and paid later, when the coordinator calls `fulfillRandomWords`.
+     * The winner is chosen and credited later, when the coordinator calls `fulfillRandomWords`.
      */
     function performUpkeep(
         bytes calldata /* performData */
@@ -87,7 +93,7 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
         external
     {
         (bool upkeepNeeded,) = checkUpkeep("");
-        require(upkeepNeeded, Raffle__UpkeepNotNeeded(address(this).balance, s_players.length, s_raffleState));
+        require(upkeepNeeded, Raffle__UpkeepNotNeeded(s_prizePool, s_players.length, s_raffleState));
         s_lastTimeStamp = block.timestamp;
         s_raffleState = RaffleState.CALCULATING;
 
@@ -104,6 +110,21 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
         // requestId is only known after the call; the coordinator is trusted and the state is already CALCULATING.
         // forge-lint: disable-next-line(reentrancy-events)
         emit RequestedRaffleWinner(requestId);
+    }
+
+    /**
+     * @notice Sends the caller everything they have won and not yet withdrawn.
+     * @dev Reverts if the caller has no winnings, or with `Raffle__TransferFailed` if the caller can't receive ETH;
+     * either way their balance is kept.
+     */
+    function withdrawWinnings() external {
+        uint256 amount = s_winnings[msg.sender];
+        require(amount > 0, Raffle__NoWinnings());
+        s_winnings[msg.sender] = 0;
+        emit WinningsWithdrawn(msg.sender, amount);
+
+        (bool success,) = msg.sender.call{value: amount}("");
+        require(success, Raffle__TransferFailed());
     }
 
     /**
@@ -131,12 +152,29 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
     }
 
     /**
+     * @notice Returns the prize for the current round: every entry fee paid since the last winner was picked.
+     * @return The prize pool, in wei. Unclaimed winnings from earlier rounds are not included.
+     */
+    function getPrizePool() external view returns (uint256) {
+        return s_prizePool;
+    }
+
+    /**
+     * @notice Returns how much an address has won and not yet withdrawn.
+     * @param winner The address to look up.
+     * @return The unclaimed winnings, in wei.
+     */
+    function getWinnings(address winner) external view returns (uint256) {
+        return s_winnings[winner];
+    }
+
+    /**
      * @notice Checks whether it is time to pick a winner.
      * @dev Upkeep is needed when all of the following are true:
      * 1. The raffle is open.
      * 2. At least `i_interval` seconds have passed since the last winner pick.
      * 3. The raffle has at least one player.
-     * 4. The contract holds ETH.
+     * 4. The prize pool is not empty.
      * The VRF subscription must also be funded for the request to succeed.
      * @return upkeepNeeded True if `performUpkeep` should be called.
      * @return performData Unused; always empty.
@@ -154,7 +192,7 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
         bool isOpen = s_raffleState == RaffleState.OPEN;
         bool timeHasPassed = block.timestamp - s_lastTimeStamp >= i_interval;
         bool hasPlayers = s_players.length > 0;
-        bool hasBalance = address(this).balance > 0;
+        bool hasBalance = s_prizePool > 0;
         upkeepNeeded = isOpen && timeHasPassed && hasPlayers && hasBalance;
         return (upkeepNeeded, "");
     }
@@ -167,17 +205,18 @@ contract Raffle is VRFConsumerBaseV2Plus, AutomationCompatibleInterface {
         return s_players;
     }
 
+    /// @dev Credits the prize instead of sending it, so this callback makes no external call and can't be made to
+    /// revert by the winner. A revert here would leave the raffle stuck in `CALCULATING`.
     function fulfillRandomWords(uint256, uint256[] calldata randomWords) internal override {
         uint256 winnerIndex = randomWords[0] % s_players.length;
         address payable winner = s_players[winnerIndex];
 
+        s_winnings[winner] += s_prizePool;
+        s_prizePool = 0;
         s_players = new address payable[](0);
         s_lastTimeStamp = block.timestamp;
         s_raffleState = RaffleState.OPEN;
 
         emit WinnerPicked(winner);
-
-        (bool success,) = winner.call{value: address(this).balance}("");
-        require(success, Raffle__TransferFailed());
     }
 }

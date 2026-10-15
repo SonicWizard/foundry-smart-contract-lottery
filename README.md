@@ -7,11 +7,16 @@ A provably fair raffle built with [Foundry](https://getfoundry.sh/), using
 ## How it works
 
 1. Players call `enterRaffle` and pay the entrance fee (0.01 ETH).
-2. Once the interval (30 seconds) has passed and the raffle has players and ETH, `checkUpkeep` returns true.
+2. Once the interval (30 seconds) has passed and the raffle has players, `checkUpkeep` returns true.
 3. `performUpkeep` can then be called. It closes entries (the raffle state becomes `CALCULATING`) and requests a
    random number from the VRF coordinator.
-4. The coordinator calls back `fulfillRandomWords`, which picks the winner, resets the raffle for the next round and
-   sends the winner the whole balance.
+4. The coordinator calls back `fulfillRandomWords`, which picks the winner, credits them with the round's prize and
+   resets the raffle for the next round.
+5. The winner calls `withdrawWinnings` to collect their prize. Winnings they leave in the raffle add up across rounds
+   and never count towards a later round's prize.
+
+The prize is credited rather than sent so that a winner who can't receive ETH can't stop the raffle (see
+[Why winners withdraw their prize](#why-winners-withdraw-their-prize)).
 
 The project includes a [Chainlink CRE](https://docs.chain.link/cre) workflow that calls `performUpkeep` when it's due,
 in place of Chainlink Automation (see [Automating upkeep with Chainlink CRE](#automating-upkeep-with-chainlink-cre)).
@@ -124,6 +129,13 @@ Forge refuses to broadcast.
    mise run upkeep:sepolia <raffle-address> <account>
    ```
 
+6. **Withdraw the prize** from the winning account. Check the amount first with
+   `cast call <raffle-address> "getWinnings(address)(uint256)" <winner-address> --rpc-url sepolia`:
+
+   ```shell
+   op run --env-file=.env -- cast send <raffle-address> "withdrawWinnings()" --rpc-url sepolia --account <account>
+   ```
+
 To add an existing raffle to the subscription again, run `mise run sub:add-consumer:sepolia <raffle-address> <account>`.
 
 ## Automating upkeep with Chainlink CRE
@@ -208,22 +220,28 @@ creates one when nothing is broadcast, so locally the raffle runs only inside te
   checked before any script runs on Sepolia.
 - **Adding a consumer:** `AddConsumer` takes the raffle address as an argument instead of finding the latest
   deployment with `foundry-devops`, so no `fs_permissions` are needed.
+- **Payout:** winners withdraw their prize with `withdrawWinnings` instead of being sent it by `fulfillRandomWords`
+  (see [Why winners withdraw their prize](#why-winners-withdraw-their-prize)).
 - **Tests:** every script is tested, a two-round end-to-end test runs whole rounds with several players, and coverage
   is 100% for lines and branches. Tests that need the local VRF mock are reported as skipped on a fork rather than
   passing without running.
 
-## Known issues
+## Why winners withdraw their prize
 
-### A winner that can't receive ETH stops the raffle
+In the course version, `fulfillRandomWords` sends the prize straight to the winner and reverts if that send fails. A
+contract with no `receive` or `fallback` function can enter the raffle, by mistake or on purpose. If it won, the
+callback reverted, so the players, timestamp and state were never reset. The raffle then stayed in `CALCULATING` for
+good: no one could enter, `checkUpkeep` never returned true again, and the prize was locked in the contract. VRF doesn't
+retry a failed callback, so there was no way out.
 
-`fulfillRandomWords` sends the prize straight to the winner and reverts with `Raffle__TransferFailed` if that send
-fails. A contract with no `receive` or `fallback` function can enter the raffle, either by mistake or on purpose. If
-it wins, the callback reverts, so the players, timestamp and state are never reset. The raffle then stays in
-`CALCULATING` for good: no one can enter, and `checkUpkeep` never returns true again. The prize is locked in the
-contract.
+This version uses the withdrawal pattern instead:
 
-`test_RevertWhen_WinnerRejectsPayment` in `test/unit/RaffleTest.t.sol` reproduces this.
+- `fulfillRandomWords` makes no external call. It adds the round's prize to the winner's balance, which
+  `getWinnings(address)` returns, and resets the round, so it can't be made to revert by the winner.
+- The winner calls `withdrawWinnings` to collect everything they have won. If the payment fails, the call reverts and
+  the balance is kept, so a winner that can't receive ETH loses only access to its own prize.
+- The current round's prize is tracked in its own variable (`getPrizePool()`) instead of being read from the
+  contract's balance, so unclaimed winnings from earlier rounds aren't paid out again or counted by `checkUpkeep`.
 
-**Fix to make before a real deployment:** switch from sending the prize to letting the winner withdraw it.
-`fulfillRandomWords` would record the winner's balance and reset the round without making any external call. A
-separate `withdraw` function would then pay out, so a failed payment affects only that winner.
+`test_WinnerThatRejectsEthDoesNotStopRaffle` in `test/unit/RaffleTest.t.sol` shows that a winner that rejects ETH no
+longer blocks the next round.

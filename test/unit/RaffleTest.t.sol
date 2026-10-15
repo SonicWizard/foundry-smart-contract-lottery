@@ -68,6 +68,7 @@ contract RaffleTest is SkipForkTest {
         address payable[] memory players = raffle.getPlayers();
         assertEq(players.length, 1);
         assertEq(players[0], player);
+        assertEq(raffle.getPrizePool(), entranceFee);
         assertEq(address(raffle).balance, entranceFee);
     }
 
@@ -151,7 +152,7 @@ contract RaffleTest is SkipForkTest {
         IVRFCoordinatorV2_5Mock(vrfCoordinator).fulfillRandomWords(requestId, address(raffle));
     }
 
-    function testFuzz_FulfillPicksWinnerResetsAndPays(uint256 randomWord) external skipFork raffleEntered {
+    function testFuzz_FulfillPicksWinnerResetsAndCreditsPrize(uint256 randomWord) external skipFork raffleEntered {
         address[] memory players = new address[](ADDITIONAL_PLAYERS + 1);
         players[0] = player;
         for (uint256 i = 1; i <= ADDITIONAL_PLAYERS; i++) {
@@ -173,26 +174,91 @@ contract RaffleTest is SkipForkTest {
         emit Raffle.WinnerPicked(expectedWinner);
         IVRFCoordinatorV2_5Mock(vrfCoordinator).fulfillRandomWordsWithOverride(requestId, address(raffle), randomWords);
 
-        assertEq(expectedWinner.balance, STARTING_PLAYER_BALANCE - entranceFee + prize);
-        assertEq(address(raffle).balance, 0);
+        // The prize is credited, not sent: it stays in the raffle until the winner withdraws it.
+        assertEq(raffle.getWinnings(expectedWinner), prize);
+        assertEq(expectedWinner.balance, STARTING_PLAYER_BALANCE - entranceFee);
+        assertEq(address(raffle).balance, prize);
+        assertEq(raffle.getPrizePool(), 0);
         assertEq(uint256(raffle.getRaffleState()), uint256(Raffle.RaffleState.OPEN));
         assertEq(raffle.getPlayers().length, 0);
         assertEq(raffle.getLastTimeStamp(), vm.getBlockTimestamp());
     }
 
-    function test_RevertWhen_WinnerRejectsPayment() external {
+    function test_WinnerThatRejectsEthDoesNotStopRaffle() external {
         address rejecter = address(new EthRejecter());
         hoax(rejecter, STARTING_PLAYER_BALANCE);
         raffle.enterRaffle{value: entranceFee}();
         vm.warp(vm.getBlockTimestamp() + interval + 1);
         vm.roll(vm.getBlockNumber() + 1);
-        uint256 requestId = performUpkeepAndGetRequestId();
 
-        // The mock swallows reverts from the consumer, so call the raffle directly as the coordinator.
-        uint256[] memory randomWords = new uint256[](1);
-        vm.prank(vrfCoordinator);
+        pickWinner(performUpkeepAndGetRequestId(), 0);
+
+        assertEq(raffle.getWinnings(rejecter), entranceFee);
+        assertEq(uint256(raffle.getRaffleState()), uint256(Raffle.RaffleState.OPEN));
+
+        // The next round runs as normal.
+        vm.prank(player);
+        raffle.enterRaffle{value: entranceFee}();
+        vm.warp(vm.getBlockTimestamp() + interval + 1);
+        vm.roll(vm.getBlockNumber() + 1);
+        pickWinner(performUpkeepAndGetRequestId(), 0);
+        assertEq(raffle.getWinnings(player), entranceFee);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           WITHDRAW WINNINGS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_WithdrawWinningsPaysWinner() external raffleEntered {
+        pickWinner(performUpkeepAndGetRequestId(), 0);
+        uint256 balanceBefore = player.balance;
+
+        vm.expectEmit(true, false, false, true, address(raffle));
+        emit Raffle.WinningsWithdrawn(player, entranceFee);
+        vm.prank(player);
+        raffle.withdrawWinnings();
+
+        assertEq(player.balance, balanceBefore + entranceFee);
+        assertEq(raffle.getWinnings(player), 0);
+        assertEq(address(raffle).balance, 0);
+    }
+
+    function test_WinningsAccumulateAcrossRounds() external raffleEntered {
+        pickWinner(performUpkeepAndGetRequestId(), 0);
+
+        // Unclaimed winnings stay out of the next round's prize pool.
+        vm.prank(player);
+        raffle.enterRaffle{value: entranceFee}();
+        assertEq(raffle.getPrizePool(), entranceFee);
+        vm.warp(vm.getBlockTimestamp() + interval + 1);
+        vm.roll(vm.getBlockNumber() + 1);
+        pickWinner(performUpkeepAndGetRequestId(), 0);
+
+        assertEq(raffle.getWinnings(player), 2 * entranceFee);
+        vm.prank(player);
+        raffle.withdrawWinnings();
+        assertEq(address(raffle).balance, 0);
+    }
+
+    function test_RevertWhen_WithdrawingWithoutWinnings() external {
+        vm.prank(player);
+        vm.expectRevert(Raffle.Raffle__NoWinnings.selector);
+        raffle.withdrawWinnings();
+    }
+
+    function test_RevertWhen_WithdrawalRejected() external {
+        address rejecter = address(new EthRejecter());
+        hoax(rejecter, STARTING_PLAYER_BALANCE);
+        raffle.enterRaffle{value: entranceFee}();
+        vm.warp(vm.getBlockTimestamp() + interval + 1);
+        vm.roll(vm.getBlockNumber() + 1);
+        pickWinner(performUpkeepAndGetRequestId(), 0);
+
+        // A failed payment reverts, so the winnings are kept.
+        vm.prank(rejecter);
         vm.expectRevert(Raffle.Raffle__TransferFailed.selector);
-        raffle.rawFulfillRandomWords(requestId, randomWords);
+        raffle.withdrawWinnings();
+        assertEq(raffle.getWinnings(rejecter), entranceFee);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -211,5 +277,14 @@ contract RaffleTest is SkipForkTest {
             }
         }
         revert("RequestedRaffleWinner not emitted");
+    }
+
+    /// @dev Answers `requestId` as the coordinator. Unlike the local mock, which swallows the raffle's reverts, this
+    /// surfaces them, and it also works on a fork.
+    function pickWinner(uint256 requestId, uint256 randomWord) private {
+        uint256[] memory randomWords = new uint256[](1);
+        randomWords[0] = randomWord;
+        vm.prank(vrfCoordinator);
+        raffle.rawFulfillRandomWords(requestId, randomWords);
     }
 }

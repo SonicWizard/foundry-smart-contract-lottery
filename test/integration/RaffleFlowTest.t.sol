@@ -50,8 +50,8 @@ contract RaffleFlowTest is SkipForkTest {
         address[] memory firstRound = newPlayers("first", FIRST_ROUND_PLAYERS);
         address firstWinner = playRound(firstRound, 2, subscriptionId, false);
 
-        // Round two is triggered by a CRE report. The first winner plays again with new players and wins only this
-        // round's prize, so nothing from round one (players or ETH) may be left behind.
+        // Round two is triggered by a CRE report. The first winner plays again with new players without withdrawing,
+        // and wins again: only this round's prize is added, so nothing from round one (players or ETH) may leak in.
         address[] memory newcomers = newPlayers("second", SECOND_ROUND_NEW_PLAYERS);
         address[] memory secondRound = new address[](SECOND_ROUND_NEW_PLAYERS + 1);
         secondRound[0] = firstWinner;
@@ -59,6 +59,14 @@ contract RaffleFlowTest is SkipForkTest {
             secondRound[i + 1] = newcomers[i];
         }
         playRound(secondRound, 0, subscriptionId, true);
+
+        uint256 totalWinnings = entranceFee * (FIRST_ROUND_PLAYERS + SECOND_ROUND_NEW_PLAYERS + 1);
+        assertEq(raffle.getWinnings(firstWinner), totalWinnings);
+        uint256 balanceBefore = firstWinner.balance;
+        vm.prank(firstWinner);
+        raffle.withdrawWinnings();
+        assertEq(firstWinner.balance, balanceBefore + totalWinnings);
+        assertEq(address(raffle).balance, 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -76,7 +84,7 @@ contract RaffleFlowTest is SkipForkTest {
             raffle.enterRaffle{value: entranceFee}();
         }
         uint256 prize = entranceFee * players.length;
-        assertEq(address(raffle).balance, prize);
+        assertEq(raffle.getPrizePool(), prize);
         assertEq(raffle.getPlayers().length, players.length);
 
         // Upkeep isn't due until the interval has passed, so an early trigger (or a stale CRE report) does nothing.
@@ -89,7 +97,7 @@ contract RaffleFlowTest is SkipForkTest {
         assertEq(uint256(raffle.getRaffleState()), uint256(Raffle.RaffleState.CALCULATING));
 
         winner = players[winnerIndex];
-        uint256 winnerStartingBalance = winner.balance;
+        uint256 winningsBefore = raffle.getWinnings(winner);
         (uint96 subscriptionBalanceBefore,,,,) = vrfCoordinator.getSubscription(subscriptionId);
 
         // A word larger than the player count, so the winner is picked through the modulo.
@@ -100,8 +108,10 @@ contract RaffleFlowTest is SkipForkTest {
         vrfCoordinator.fulfillRandomWordsWithOverride(requestId, address(raffle), randomWords);
 
         // The mock swallows reverts from the raffle, so these checks are what prove the callback succeeded.
-        assertEq(winner.balance, winnerStartingBalance + prize);
-        assertEq(address(raffle).balance, 0);
+        assertEq(raffle.getWinnings(winner), winningsBefore + prize);
+        assertEq(raffle.getPrizePool(), 0);
+        // In these rounds the winner is the only one with unclaimed winnings.
+        assertEq(address(raffle).balance, raffle.getWinnings(winner));
         assertEq(raffle.getPlayers().length, 0);
         assertEq(uint256(raffle.getRaffleState()), uint256(Raffle.RaffleState.OPEN));
         assertEq(raffle.getLastTimeStamp(), vm.getBlockTimestamp());
